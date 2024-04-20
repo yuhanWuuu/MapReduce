@@ -22,8 +22,8 @@ if __name__ == '__main__':
     lines = []
     with open(input_path, 'r') as f:
         for line in f:
-            lines.append(line[:-len(os.linesep)])
-    
+            lines.append(line[:-len(os.linesep)+1])
+
     # map
     pairs: List[Tuple[Any, Any]] = []
     for line in lines:
