@@ -1,68 +1,50 @@
 from mapper import Mapper
 from reducer import Reducer
+import pickle
+import queue
+from collections import defaultdict
 import multiprocessing
 import sys
 import os
-import queue
-import pickle
 
 
-def worker_map(queue_input: queue, queue_output: queue):
-    while not queue_input.empty():
-        line = queue_input.get()
+def worker_map(map_input: queue, map_output: queue):
+    """
+    map方法，将输入解析为 (xx, 1) 的形式
+    :param map_input: ["a bb", "bb cc"]
+    :param map_output: [('a', 1), ('bb', 1), ('bb', 1), ('cc', 1)]
+    """
+    while not map_input.empty():
+        line = map_input.get()
         for result in mapper.map(line):
-            queue_output.put(result)
+            map_output.put(result)
 
 
-def worker_reduce(queue_input: queue, queue_output: queue):
-    intermediate = {}
-    while not queue_input.empty():
-        key, value = queue_input.get()
-        if key in intermediate:
-            intermediate[key].append(value)
-        else:
-            intermediate[key] = [value]
+def shuffle(map_output: queue, reduce_input: queue):
+    """
+    shuffle方法，将map的输出shuffle为 [K2, list(V2)] 的形式
+    :param map_output: [('a', 1), ('bb', 1), ('bb', 1), ('cc', 1)]
+    :param reduce_input: [('a', [1]), ('bb', [1, 1]), ('cc', [1])]
+    """
+    shuffled_data = defaultdict(list)
 
-    for key, values in intermediate.items():
-        queue_output.put(reducer.reduce(key, values))
+    while not map_output.empty():
+        key, value = map_output.get()
+        shuffled_data[key].append(value)
 
-
-def main(input_path: str, output_path: str, num_workers: int = 2):
-    queue_input = queue.Queue()
-    queue_intermediate = queue.Queue()
-    queue_output = queue.Queue()
-
-    # 读取输入文件
-    with open(input_path, 'r') as f:
-        for line in f:
-            queue_input.put(line.strip())
+    for key, values in shuffled_data.items():
+        reduce_input.put((key, values))
 
 
-    # 创建并启动Mapper进程
-    map_processes = [multiprocessing.Process(target=worker_map, args=(queue_input, queue_intermediate)) 
-                     for _ in range(num_workers)]
-    for p in map_processes:
-        p.start()
-
-    # 等待所有Mapper进程完成
-    for p in map_processes:
-        p.join()
-
-    # 创建并启动Reducer进程
-    reduce_processes = [multiprocessing.Process(target=worker_reduce, args=(queue_intermediate, queue_output))
-                        for _ in range(num_workers)]
-    for p in reduce_processes:
-        p.start()
-
-    # 等待所有Reducer进程完成
-    for p in reduce_processes:
-        p.join()
-
-    # 输出结果到文件
-    with open(output_path, 'w') as f:
-        while not queue_output.empty():
-            key, count = queue_output.get()
-            f.write(f'{key}\t{count}\n')
+def worker_reduce(redece_input: queue, reduce_output: queue):
+    """
+    reduce方法，对shuffle的结果求和输出
+    :param redece_input: [('a', [1]), ('bb', [1, 1]), ('cc', [1])]
+    :param reduce_output: [('a', 1), ('bb', 2), ('cc', 1)]
+    """
+    while not redece_input.empty():
+        key, value = redece_input.get()
+        reduce_output.put(reducer.reduce(key, value))
 
 
 if __name__ == '__main__':
@@ -78,4 +60,43 @@ if __name__ == '__main__':
     with open(reducer_path, 'rb') as f:
         reducer = pickle.load(f)()
 
-    main(input_path, output_path)
+    map_input = queue.Queue()
+    map_output = queue.Queue()
+    reduce_input = queue.Queue()
+    reduce_output = queue.Queue()
+    num_workers = 1
+
+    # 读取输入文件
+    with open(input_path, 'r') as f:
+        for line in f:
+            map_input.put(line.strip())
+
+    # worker_map(map_input, map_output)
+    # shuffle(map_output, reduce_input)
+    # worker_reduce(reduce_input, reduce_output)
+    # print(list(reduce_output.queue))
+
+    # 创建并启动Mapper进程
+    map_processes = [multiprocessing.Process(target=worker_map, args=(map_input, map_output))
+                     for i in range(num_workers)]
+    for p in map_processes:
+        p.start()
+    for p in map_processes:
+        p.join()
+
+    # shuffle数据
+    shuffle(map_output, reduce_input)
+
+    # 创建并启动Reducer进程
+    reduce_processes = [multiprocessing.Process(target=worker_reduce, args=(reduce_input, reduce_output))
+                        for i in range(num_workers)]
+    for p in reduce_processes:
+        p.start()
+    for p in reduce_processes:
+        p.join()
+
+    # 输出结果
+    with open(output_path, 'w') as f:
+        while not reduce_output.empty():
+            key, count = reduce_output.get()
+            f.write(f'{key}\t{count}\n')
