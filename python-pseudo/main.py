@@ -1,13 +1,15 @@
+import glob
+
 from mapper import Mapper
 from reducer import Reducer
 import pickle
 import queue
-from collections import defaultdict
+from collections import defaultdict, OrderedDict
 import multiprocessing
 import sys
 
 
-def read_file(file_path):
+def read_file(file_path) -> list:
     """
     读取文件
     :param file_path: 文件地址
@@ -16,6 +18,24 @@ def read_file(file_path):
     with open(file_path, 'r') as f:
         lines = f.readlines()
         return lines
+
+
+def divide_file(content, filename):
+    """
+    把文件均匀分成n份，每份送入一个map/reduce，能处理不能均分的情况
+    :param content: 输入文件内容
+    :param filename: 保存文件的名字前缀
+    """
+    # 每组map传入的输入数据数量为 文件行数//进程数
+    total_lines = len(content)
+    lines_per_file = total_lines // num_workers
+    extra_lines = total_lines % num_workers
+
+    for i in range(num_workers):
+        with open(f"../{filename}_{i}.txt", 'w') as f:
+            start_line = i * lines_per_file + min(i, extra_lines)  # 对于多余的行数，在前面文件中每个加一行
+            end_line = start_line + lines_per_file + (1 if i < extra_lines else 0)
+            f.writelines(content[start_line:end_line])
 
 
 def worker_map(map_input: str, map_output: str):
@@ -31,24 +51,25 @@ def worker_map(map_input: str, map_output: str):
                 f.write(f'{k}\t{v}\n')
 
 
-def shuffle(map_output: str, reduce_input: str):
+def shuffle(file_pattern):
     """
-    shuffle方法，将map的输出shuffle为 [K2, list(V2)] 的形式
-    :param map_output: [('a', 1), ('bb', 1), ('bb', 1), ('cc', 1)]
-    :param reduce_input: [('a', [1]), ('bb', [1, 1]), ('cc', [1])]
+    对map的输出文件进行shuffle和排序后输出，输出为多个reduce输入文件
+    :param file_pattern: map的输出文件格式，如："../map_output_*.txt"
     """
     shuffle_data = defaultdict(list)
-    with open(map_output, 'r') as f:
-        for line in f:
-            key, value = line.strip().split('\t')
-            shuffle_data[key].append(int(value))
+    # 读取每个文件并将键值对添加到字典中
+    for filename in glob.glob(file_pattern):
+        with open(filename, 'r') as f:
+            for line in f:
+                key, value = line.strip().split('\t')
+                shuffle_data[key].append(int(value))
+    # 将字典内容排序并输出为字符串数组
+    shuffle_data_str = [key+'\t'+str(shuffle_data[key])+'\n' for key in sorted(shuffle_data)]
+    # 拆分数据
+    divide_file(shuffle_data_str, "reduce_input")
 
-    with open(reduce_input, 'w') as f:
-        for k, v in shuffle_data.items():
-            f.write(f'{k}\t{v}\n')
 
-
-def worker_reduce(redece_input: queue, reduce_output: queue):
+def worker_reduce(redece_input: str, reduce_output: str):
     """
     reduce方法，对shuffle的结果求和输出
     :param redece_input: [('a', [1]), ('bb', [1, 1]), ('cc', [1])]
@@ -74,32 +95,34 @@ if __name__ == '__main__':
     with open(reducer_path, 'rb') as f:
         reducer = pickle.load(f)()
 
-    map_input = input_path
-    map_output = "../map_output.txt"
-    reduce_input = "../reduce_input.txt"
-    reduce_output = output_path
-    num_workers = 1
+    # map/reduce进程数量
+    num_workers = 3
 
-    # region
-    # print("map_input", read_file(map_input))
-    # worker_map(map_input, map_output)
-    # print("map_output", read_file(map_output))
-    # shuffle(map_output, reduce_input)
-    # print("reduce_input", read_file(reduce_input))
-    # worker_reduce(reduce_input, reduce_output)
-    # print("reduce_output", read_file(reduce_output))
-    # endregion
+    # 拆分输入为 num_workers 个文件，
+    divide_file(read_file(input_path), "map_input")
 
     # 创建并启动Mapper进程
-    map_process = multiprocessing.Process(target=worker_map, args=(map_input, map_output))
-    map_process.start()
-    map_process.join()
+    map_processes = [multiprocessing.Process(target=worker_map, args=(f"../map_input_{i}.txt", f"../map_output_{i}.txt"))
+                     for i in range(num_workers)]
+    for p in map_processes:
+        p.start()
+    for p in map_processes:
+        p.join()
 
     # shuffle数据
-    shuffle(map_output, reduce_input)
+    shuffle("../map_output_*.txt")
 
     # 创建并启动Reducer进程
-    reduce_process = multiprocessing.Process(target=worker_reduce, args=(reduce_input, reduce_output))
-    reduce_process.start()
-    reduce_process.join()
+    reduce_processes = [multiprocessing.Process(target=worker_reduce, args=(f"../reduce_input_{i}.txt", f"../reduce_output_{i}.txt"))
+                        for i in range(num_workers)]
+    for p in reduce_processes:
+        p.start()
+    for p in reduce_processes:
+        p.join()
 
+    # 合并reduce结果
+    with open(output_path, 'w') as f:
+        for i in range(num_workers):
+            with open(f"../reduce_output_{i}.txt", 'r') as rf:
+                for s in rf:
+                    f.write(s)
